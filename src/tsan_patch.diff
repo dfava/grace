@@ -1,0 +1,219 @@
+diff --git a/lib/tsan/go/tsan_go.cpp b/lib/tsan/go/tsan_go.cpp
+index f5998c0c7..a9d8c8fbb 100644
+--- a/lib/tsan/go/tsan_go.cpp
++++ b/lib/tsan/go/tsan_go.cpp
+@@ -15,8 +15,14 @@
+ #include "sanitizer_common/sanitizer_common.h"
+ #include <stdlib.h>
+ 
++#define GRACE 1
++
+ namespace __tsan {
+ 
++uptr closechanPC = 0;
++uptr chansendPC = 0;
++
++
+ void InitializeInterceptors() {
+ }
+ 
+@@ -170,10 +176,27 @@ void __tsan_map_shadow(uptr addr, uptr size) {
+ }
+ 
+ void __tsan_read(ThreadState *thr, void *addr, void *pc) {
++  if (GRACE) Printf("%s,%p,tid=%d,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), addr, pc);
+   MemoryRead(thr, (uptr)pc, (uptr)addr, kSizeLog1);
+ }
+ 
+ void __tsan_read_pc(ThreadState *thr, void *addr, uptr callpc, uptr pc) {
++  if (GRACE) {
++    if (chansendPC == 0) {
++      SymbolizeCodeContext cbctx;
++      internal_memset(&cbctx, 0, sizeof(cbctx));
++      cbctx.pc = pc;
++      go_runtime_cb(CallbackSymbolizeCode, &cbctx);
++      if (internal_strcmp(cbctx.func, "runtime.chansend") == 0) {
++        chansendPC = pc;
++      }
++    }
++
++    if (chansendPC != 0 && pc == chansendPC) {
++      Printf("%s,%p,tid=%d,%p,%p,%p,%s\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), addr, callpc, pc, "chansend");
++    }
++  }
++
+   if (callpc != 0)
+     FuncEntry(thr, callpc);
+   MemoryRead(thr, (uptr)pc, (uptr)addr, kSizeLog1);
+@@ -182,10 +205,27 @@ void __tsan_read_pc(ThreadState *thr, void *addr, uptr callpc, uptr pc) {
+ }
+ 
+ void __tsan_write(ThreadState *thr, void *addr, void *pc) {
++  if (GRACE) Printf("%s,%p,tid=%d,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), addr, pc);
+   MemoryWrite(thr, (uptr)pc, (uptr)addr, kSizeLog1);
+ }
+ 
+ void __tsan_write_pc(ThreadState *thr, void *addr, uptr callpc, uptr pc) {
++  if (GRACE) {
++    if (closechanPC == 0) {
++      SymbolizeCodeContext cbctx;
++      internal_memset(&cbctx, 0, sizeof(cbctx));
++      cbctx.pc = pc;
++      go_runtime_cb(CallbackSymbolizeCode, &cbctx);
++      if (internal_strcmp(cbctx.func, "runtime.closechan") == 0) {
++        closechanPC = pc;
++      }
++    }
++
++    if (closechanPC != 0 && pc == closechanPC) {
++      Printf("%s,%p,tid=%d,%p,%p,%p,%s\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), addr, callpc, pc, "closechan");
++    }
++  }
++
+   if (callpc != 0)
+     FuncEntry(thr, callpc);
+   MemoryWrite(thr, (uptr)pc, (uptr)addr, kSizeLog1);
+@@ -194,22 +234,35 @@ void __tsan_write_pc(ThreadState *thr, void *addr, uptr callpc, uptr pc) {
+ }
+ 
+ void __tsan_read_range(ThreadState *thr, void *addr, uptr size, uptr pc) {
++  if (GRACE) Printf("%s,%p,tid=%d\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid));
+   MemoryAccessRange(thr, (uptr)pc, (uptr)addr, size, false);
+ }
+ 
+ void __tsan_write_range(ThreadState *thr, void *addr, uptr size, uptr pc) {
++  if (GRACE) Printf("%s,%p,tid=%d\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid));
+   MemoryAccessRange(thr, (uptr)pc, (uptr)addr, size, true);
+ }
+ 
+ void __tsan_func_enter(ThreadState *thr, void *pc) {
++  if (GRACE) {
++    SymbolizeCodeContext cbctx;
++    internal_memset(&cbctx, 0, sizeof(cbctx));
++    cbctx.pc = (uptr)pc;
++    go_runtime_cb(CallbackSymbolizeCode, &cbctx);
++    Printf("%s,%p,tid=%d,%p,%s\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), pc, cbctx.func);
++  }
+   FuncEntry(thr, (uptr)pc);
+ }
+ 
+ void __tsan_func_exit(ThreadState *thr) {
++  if (GRACE) {
++    Printf("%s,%p,tid=%d\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid));
++  }
+   FuncExit(thr);
+ }
+ 
+ void __tsan_malloc(ThreadState *thr, uptr pc, uptr p, uptr sz) {
++  if (GRACE) Printf("%s,%p,tid=%d,%p,%p,0x%llx\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), (void*) pc, (void*) p, (u64) sz);
+   CHECK(inited);
+   if (thr && pc)
+     ctx->metamap.AllocBlock(thr, pc, p, sz);
+@@ -217,6 +270,7 @@ void __tsan_malloc(ThreadState *thr, uptr pc, uptr p, uptr sz) {
+ }
+ 
+ void __tsan_free(uptr p, uptr sz) {
++  if (GRACE) Printf("%s\n", __func__);
+   ctx->metamap.FreeRange(get_cur_proc(), p, sz);
+ }
+ 
+@@ -225,9 +279,12 @@ void __tsan_go_start(ThreadState *parent, ThreadState **pthr, void *pc) {
+   *pthr = thr;
+   int goid = ThreadCreate(parent, (uptr)pc, 0, true);
+   ThreadStart(thr, goid, 0, ThreadType::Regular);
++
++  if (GRACE) Printf("%s,%p,tid=%d,%p,tid=%d,%p\n", __func__, parent, parent->tid, thr, thr->tid, pc);
+ }
+ 
+ void __tsan_go_end(ThreadState *thr) {
++  if (GRACE) Printf("%s,%p,tid=%d\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid));
+   ThreadFinish(thr);
+   internal_free(thr);
+ }
+@@ -241,14 +298,17 @@ void __tsan_proc_destroy(Processor *proc) {
+ }
+ 
+ void __tsan_acquire(ThreadState *thr, void *addr) {
++  if (GRACE) Printf("%s,%p,tid=%d,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), addr);
+   Acquire(thr, 0, (uptr)addr);
+ }
+ 
+ void __tsan_release(ThreadState *thr, void *addr) {
++  if (GRACE) Printf("%s,%p,tid=%d,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), addr);
+   ReleaseStore(thr, 0, (uptr)addr);
+ }
+ 
+ void __tsan_release_merge(ThreadState *thr, void *addr) {
++  if (GRACE) Printf("%s,%p,tid=%d,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), addr);
+   Release(thr, 0, (uptr)addr);
+ }
+ 
+diff --git a/lib/tsan/rtl/tsan_interface_atomic.cpp b/lib/tsan/rtl/tsan_interface_atomic.cpp
+index 3f459aff5..dc510b473 100644
+--- a/lib/tsan/rtl/tsan_interface_atomic.cpp
++++ b/lib/tsan/rtl/tsan_interface_atomic.cpp
+@@ -896,47 +896,56 @@ void __tsan_atomic_signal_fence(morder mo) {
+ extern "C" {
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic32_load(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC_RET(Load, *(a32*)(a+8), *(a32**)a, mo_acquire);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic64_load(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC_RET(Load, *(a64*)(a+8), *(a64**)a, mo_acquire);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic32_store(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC(Store, *(a32**)a, *(a32*)(a+8), mo_release);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic64_store(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC(Store, *(a64**)a, *(a64*)(a+8), mo_release);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic32_fetch_add(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC_RET(FetchAdd, *(a32*)(a+16), *(a32**)a, *(a32*)(a+8), mo_acq_rel);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic64_fetch_add(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC_RET(FetchAdd, *(a64*)(a+16), *(a64**)a, *(a64*)(a+8), mo_acq_rel);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic32_exchange(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC_RET(Exchange, *(a32*)(a+16), *(a32**)a, *(a32*)(a+8), mo_acq_rel);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic64_exchange(ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   ATOMIC_RET(Exchange, *(a64*)(a+16), *(a64**)a, *(a64*)(a+8), mo_acq_rel);
+ }
+ 
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic32_compare_exchange(
+     ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   a32 cur = 0;
+   a32 cmp = *(a32*)(a+8);
+   ATOMIC_RET(CAS, cur, *(a32**)a, cmp, *(a32*)(a+12), mo_acq_rel, mo_acquire);
+@@ -946,6 +955,7 @@ void __tsan_go_atomic32_compare_exchange(
+ SANITIZER_INTERFACE_ATTRIBUTE
+ void __tsan_go_atomic64_compare_exchange(
+     ThreadState *thr, uptr cpc, uptr pc, u8 *a) {
++  if (GRACE) { Printf("%s,%p,tid=%d,%p,%p,%p\n", __func__, thr, (thr==NULL?kInvalidTid:thr->tid), cpc, pc, a); }
+   a64 cur = 0;
+   a64 cmp = *(a64*)(a+8);
+   ATOMIC_RET(CAS, cur, *(a64**)a, cmp, *(a64*)(a+16), mo_acq_rel, mo_acquire);
