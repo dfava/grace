@@ -6,6 +6,8 @@ Go ships with a [race detector](https://blog.golang.org/race-detector) based on 
 
 Also, Grace treats channels as first class, meaning, it observes send and receive operations on channels, as opposed to acquire/release operations on the locks protecting channel buffer entries.
 
+For details, check out our [paper on arXiv](https://arxiv.org/abs/1910.12643).
+
 
 ### Data races
 
