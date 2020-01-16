@@ -88,6 +88,70 @@ The prototype is written in Python, in `grace.py`.
 The prototype can be fed traces "manually" by calling functions in the `Grace` class.  The prototype can also consume traces from TSan, using a layer `t2g.py` that translates calls to TSan into Grace events.  To that end, TSan needs to be recompiled as to print certain calls from the Go runtime; see `tsan_patch.diff`.
 
 
+### TSan and Go
+
+Go ships with a race detector based on [TSan](https://github.com/google/sanitizers), which can be invoked with the `-race` command line flag:
+
+```
+go run -race my_program.go
+```
+
+To see what `-race` does, we can compile (but not link) a Go program and inspect the object file produced.  Take the `producer_consumers.go` file in `src/examples`:
+
+```
+$ go tool compile -race producer_consumers.go
+$ go tool objdump producer_consumers.o
+```
+
+The first line above compiles the example and creates the file `producer_consumer.o`, the second line dumps the contents of the object file so we can read it.
+If you search for the word `race` in the disassemble, you'll see many calls to things like `runtime.racefuncenter`, `runtime.racefuncexit`, `runtime.raceread` or `runtime.racewrite`.  These are calls into the race detector.  If you have the [Go sources](https://github.com/golang/go.git) available to follow along,  you can see that these functions are declared in `go/src/runtime/race.go`, but where/how are they implemented?  They are "implemented" in a platform specific way, inside the `race_amd64.s`, `race_arm64.s`, and `race_ppc64le.s` assembly files, depending on the architecture.  The word "implementation" is in quotes since the implementation is simply some thunk code that calls out to something else.  Here is the "implementation" of `raceread` which simply calls out to `__tsan_read` passing some arguments:
+
+```
+// func runtime·raceread(addr uintptr)
+// Called from instrumented code.
+TEXT  runtime·raceread(SB), NOSPLIT, $0-8
+  MOVD  addr+0(FP), R1
+  MOVD  LR, R2
+  // void __tsan_read(ThreadState *thr, void *addr, void *pc);
+  MOVD  $__tsan_read(SB), R9
+  JMP racecalladdr<>(SB)
+```
+
+The actual implementation is in TSan, which ships with Go as a library.  The location of the TSan library is the following:
+
+```
+`go env GOTOOLDIR`/../../../src/runtime/race
+```
+
+Go ships with TSan in a `.syso` library file built for your OS and architecture.  For example, on Ubuntu we have:
+
+```
+$ cd `go env GOTOOLDIR`/../../../src/runtime/race
+$ pwd
+/usr/lib/go-1.10/src/runtime/race
+$ ls *.syso
+race_linux_amd64.syso
+```
+
+while on Mac:
+
+```
+$ cd `go env GOTOOLDIR`/../../../src/runtime/race
+$ pwd
+/usr/local/Cellar/go/1.13.5/libexec/src/runtime/race
+$ ls *.syso
+race_darwin_amd64.syso
+```
+
+We can thus change the behavior of the race detector by checking out TSan from [sources](https://git.llvm.org/git/compiler-rt.git), modifying it, and replacing the `.syso` file ships by copying over our own `.syso`.  (On Ubuntu, Go can be installed as a [snap](https://en.wikipedia.org/wiki/Snappy_(package_manager)).  Modifying contents of a snap can be tricky.  Instead, I recommend installing Go with `apt` so it's easier for us to replace the race detector.)
+
+```
+git clone https://git.llvm.org/git/compiler-rt.git
+```
+
+The Go compiler lives in `compiler-rt/lib/tsan/go`, and can be built by running the `buildgo.sh` script.  The modifications that we have done for Grace are simple: it mostly involves printing information about the calls to TSan to the console.  So, when a Go program is run with `-race`, we get lots of output.  We gather the output and feed it to the `t2g.py` script (short of Tsan-to-Grace), which converts this printed out text into calls to Grace.
+
+
 ### Citing
 
 ```
