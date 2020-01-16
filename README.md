@@ -145,11 +145,43 @@ race_darwin_amd64.syso
 
 We can thus change the behavior of the race detector by checking out TSan from [sources](https://git.llvm.org/git/compiler-rt.git), modifying it, and replacing the `.syso` file ships by copying over our own `.syso`.  (On Ubuntu, Go can be installed as a [snap](https://en.wikipedia.org/wiki/Snappy_(package_manager)).  Modifying contents of a snap can be tricky.  Instead, I recommend installing Go with `apt` so it's easier for us to replace the race detector.)
 
+#### Applying patch to TSan
+
+The modifications that we have done for Grace are simple: it mostly involves printing information about the calls to TSan to the console.  So, when a Go program is run with `-race`, we get lots of output.  We gather the output and feed it to the `t2g.py` script (short of Tsan-to-Grace), which converts this printed out text into calls to Grace.
+
+To apply our patch to TSan, check TSan out from source, copy the diff file over and apply it:
+
 ```
-git clone https://git.llvm.org/git/compiler-rt.git
+$ git clone https://git.llvm.org/git/compiler-rt.git
+$ cd compiler-rt
+$ cd path_to_grace/src/tsan_patch.diff .
+$ git apply tsan_patch.diff
+
 ```
 
-The Go compiler lives in `compiler-rt/lib/tsan/go`, and can be built by running the `buildgo.sh` script.  The modifications that we have done for Grace are simple: it mostly involves printing information about the calls to TSan to the console.  So, when a Go program is run with `-race`, we get lots of output.  We gather the output and feed it to the `t2g.py` script (short of Tsan-to-Grace), which converts this printed out text into calls to Grace.
+The Go compiler lives in `compiler-rt/lib/tsan/go`, and can be built by running the `buildgo.sh` script.  Running the script will create a `.syso` file that should then be copied to the directory:
+
+```
+`go env GOTOOLDIR`/../../../src/runtime/race
+```
+
+
+#### From `acquire` and `release` to `sends` and `receives`
+
+When a Go program is compiled, channel operations (like sends and receives) translate to calls into the Go runtime.  Channels are implemented in `go/src/runtime/chan.go`.  When race detection is enabled with `-race`, a successful send onto a channel (function `chansend` in `chan.go`) yields three calls to TSan: first a call to `__tsan_readpc`, then a call to `__tsan_acquire`, and then `__tsan_release`.  The call to `__tsan_readpc` passes along a pointer to the `chansend` function in the runtime.  If you have [applied our patch to TSan](#Applying-patch-to-TSan), when you run with `-race` a Go program that uses channels, you will see text like this being printed:
+
+```
+__tsan_read_pc,0x000001383428,tid=5,0x00c42009a070,0x000000481c03,0x000000431741,chansend
+__tsan_read,0x000001393468,tid=6,0x0000004feb88,0x000000481cd9
+__tsan_acquire,0x000001383428,tid=5,0x00c42009a0d0
+__tsan_read_pc,0x000001393468,tid=6,0x00c42009a070,0x000000481cf3,0x000000431741,chansend
+__tsan_release,0x000001383428,tid=5,0x00c42009a0d0
+```
+
+There is a bit to unpack here.  The first thing to notice is that these prints involve activities from two different threads: one with `tid=5` and another from `tid=6`.  Focusing on `tid=5`, the first is a call to `__tsan_read_pc` passing the address of `chansend` as an argument.  This line tells us that a send is starting.  The third and the last line are the lock acquisition and release protecting the entry in the channel's buffer where the message is placed.  Note that the fourth line is also a `chansend`, but from `tid=6`.  In other words, channel sends and receives from different threads can be interleaved.
+
+TSan works at the level of locks; channels are not a first-class concept.  Grace, on the other hand, works at the realm of channels, there are no locks.
+We thus put the sequence of calls to TSan (`__tsan_readpc`, `__tsan_acquire`, and `__tsan_release`) back together and interpret them as a send operation on a particular channel.  Similarly, we can reinterpret calls to TSan related to the closing-of and receiving-from from a channel.
 
 
 ### Citing
